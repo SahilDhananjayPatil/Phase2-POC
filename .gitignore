@@ -1,0 +1,19 @@
+# Python environment
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local data and secrets
+data/
+.env
+.env.*
+!.env.example
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+src-tauri/target/
+
+# Local logs
+*.log
