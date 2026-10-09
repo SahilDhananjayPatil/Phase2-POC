@@ -11,6 +11,11 @@ type CulturalRecord = {
   region: string;
 };
 
+type AppSettings = {
+  theme: string;
+  language: string;
+};
+
 const services = [
   { name: "FastAPI Backend", detail: "Application API", mark: "API", tone: "blue" },
   { name: "DuckDB", detail: "Analytics database", mark: "D", tone: "amber" },
@@ -29,6 +34,9 @@ function App() {
   const [records, setRecords] = useState<CulturalRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settingsError, setSettingsError] = useState("");
 
   async function loadDashboardData() {
     setLoading(true);
