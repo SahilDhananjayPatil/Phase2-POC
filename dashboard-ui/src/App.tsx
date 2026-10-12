@@ -65,6 +65,24 @@ function App() {
 
       const recordsData: CulturalRecord[] = await recordsResponse.json();
       setRecords(recordsData);
+      console.log("Records received by frontend:", recordsData);
+
+      try {
+        const settingsResponse = await fetch(`${API_URL}/api/settings`);
+
+  if (!settingsResponse.ok) {
+    throw new Error("Could not load SQLite settings.");
+  }
+
+  const settingsData: AppSettings = await settingsResponse.json();
+
+  setSettings(settingsData);
+  setSettingsError("");
+} catch {
+  setSettings(null);
+  setSettingsError("Unable to load SQLite settings.");
+}
+
     } catch {
       setBackendConnected(false);
       setError(
@@ -171,9 +189,16 @@ function App() {
 
             <div className="service-grid">
               {services.map((service) => {
+                // const isConnected =
+                //   backendConnected &&
+                //   (service.name === "FastAPI Backend" || service.name === "DuckDB");
                 const isConnected =
                   backendConnected &&
-                  (service.name === "FastAPI Backend" || service.name === "DuckDB");
+                  (
+                  service.name === "FastAPI Backend" ||
+                  service.name === "DuckDB" ||
+                  (service.name === "SQLite" && settings !== null)
+                  );
 
                 return (
                   <article className="service-card" key={service.name}>
@@ -294,6 +319,54 @@ function App() {
               </div>
             ) : null}
           </section>
+
+
+          
+<section
+  className="section-block"
+  aria-labelledby="settings-title"
+  id="settings"
+>
+  <div className="section-heading">
+    <div>
+      <h2 id="settings-title">Local application settings</h2>
+      <p>Settings retrieved from your SQLite database</p>
+    </div>
+
+    <span className="demo-label">
+      {settings ? "SQLITE CONNECTED" : "NOT LOADED"}
+    </span>
+  </div>
+
+  {settingsError && <p role="alert">{settingsError}</p>}
+
+  {settings ? (
+    <div className="overview-grid">
+      <article className="metric-card">
+        <div className="metric-topline">
+          <span>Theme</span>
+        </div>
+        <strong>{settings.theme}</strong>
+        <p>Saved appearance preference</p>
+      </article>
+
+      <article className="metric-card">
+        <div className="metric-topline">
+          <span>Language</span>
+        </div>
+        <strong>{settings.language}</strong>
+        <p>Saved language preference</p>
+      </article>
+    </div>
+  ) : (
+    <p>
+      {loading
+        ? "Loading SQLite settings..."
+        : "SQLite settings are unavailable."}
+    </p>
+  )}
+</section>
+
 
           <section className="section-block activity-section" aria-labelledby="activity-title" id="activity">
             <div className="section-heading">
