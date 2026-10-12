@@ -1,14 +1,167 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+
+use std::{
+    io::{BufRead, BufReader},
+    net::TcpStream,
+    process::{Child, Command, Stdio},
+    sync::{mpsc, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
+
+use tauri::{Manager, RunEvent, State};
+
+struct BackendState {
+    child: Mutex<Option<Child>>,
+    port: Mutex<Option<u16>>,
+}
+
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+fn get_backend_port(state: State<'_, BackendState>) -> Result<u16, String> {
+    let port = state
+        .port
+        .lock()
+        .map_err(|_| "Backend port lock failed".to_string())?;
+
+    port.ok_or_else(|| "Backend has not started yet".to_string())
+}
+
+fn start_backend() -> Result<(Child, u16), String> {
+    let project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| "Could not locate project root".to_string())?;
+
+    let python = project_root.join(".venv").join("Scripts").join("python.exe");
+    let launcher = project_root.join("backend").join("launcher.py");
+
+    if !python.exists() {
+        return Err(format!("Python executable not found: {}", python.display()));
+    }
+
+    if !launcher.exists() {
+        return Err(format!("Backend launcher not found: {}", launcher.display()));
+    }
+
+    let mut child = Command::new(python)
+        .arg(launcher)
+        .current_dir(&project_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| format!("Could not start FastAPI: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not capture backend output".to_string())?;
+
+    let (sender, receiver) = mpsc::channel::<u16>();
+
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+
+            if let Some(value) = line.strip_prefix("BACKEND_PORT=") {
+                if let Ok(port) = value.parse::<u16>() {
+                    let _ = sender.send(port);
+                }
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    let port = loop {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Timed out waiting for FastAPI to provide its port".to_string());
+        }
+
+        match receiver.recv_timeout(Duration::from_millis(200)) {
+            Ok(port) => break port,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(status) = child
+                    .try_wait()
+                    .map_err(|error| format!("Could not check backend process: {error}"))?
+                {
+                    return Err(format!("FastAPI exited before startup completed: {status}"));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("FastAPI closed its output before providing a port".to_string());
+            }
+        }
+    };
+
+    // The launcher prints the port before Uvicorn is fully ready.
+    // Wait until the health endpoint accepts a connection.
+    let health_deadline = Instant::now() + Duration::from_secs(15);
+
+    loop {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+
+        if Instant::now() >= health_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("FastAPI did not become ready in time".to_string());
+        }
+
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    Ok((child, port))
+}
+
+fn stop_backend(state: &BackendState) {
+    if let Ok(mut child_guard) = state.child.lock() {
+        if let Some(mut child) = child_guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let state = BackendState {
+        child: Mutex::new(None),
+        port: Mutex::new(None),
+    };
+
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![get_backend_port])
+        .setup(|app| {
+            let (child, port) = start_backend()
+                .map_err(|error| std::io::Error::other(error))?;
+
+            let state = app.state::<BackendState>();
+
+            *state.child.lock().map_err(|_| {
+                std::io::Error::other("Backend process lock failed")
+            })? = Some(child);
+
+            *state.port.lock().map_err(|_| {
+                std::io::Error::other("Backend port lock failed")
+            })? = Some(port);
+
+            println!("FastAPI is ready on 127.0.0.1:{port}");
+            Ok(())
+        });
+
+    builder
+        .build(tauri::generate_context!())
+        .expect("error while building Tauri application")
+        .run(|app_handle, event| {
+            if matches!(event, RunEvent::Exit) {
+                let state = app_handle.state::<BackendState>();
+                stop_backend(&state);
+            }
+        });
 }
