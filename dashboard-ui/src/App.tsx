@@ -1,5 +1,6 @@
 
 import { useEffect, useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import "./App.css";
 
 const API_URL = "http://127.0.0.1:8001";
@@ -30,6 +31,31 @@ const activity = [
 ];
 
 function App() {
+  const [apiUrl, setApiUrl] = useState<string | null>(null);
+
+  
+useEffect(() => {
+  if (!isTauri()) {
+    // Normal browser development mode
+    setApiUrl("http://127.0.0.1:8001");
+    return;
+  }
+
+  // Tauri desktop mode: retrieve the dynamic backend port
+  invoke<number>("get_backend_port")
+    .then((port) => {
+      console.log("Backend port received from Tauri:", port);
+      setApiUrl(`http://127.0.0.1:${port}`);
+    })
+    .catch((error) => {
+      console.error("Failed to get backend port:", error);
+      setError(`Could not get backend port from Tauri: ${String(error)}`);
+      setLoading(false);
+    });
+}, []);
+
+
+
   const [backendConnected, setBackendConnected] = useState(false);
   const [records, setRecords] = useState<CulturalRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,66 +64,73 @@ function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [settingsError, setSettingsError] = useState("");
 
-  async function loadDashboardData() {
-    setLoading(true);
-    setError("");
+  
 
-    try {
-      const healthResponse = await fetch(`${API_URL}/health`);
+async function loadDashboardData() {
+  if (!apiUrl) return;
 
-      if (!healthResponse.ok) {
-        throw new Error("Backend health check failed.");
-      }
-
-      const healthData = await healthResponse.json();
-
-      if (healthData.status !== "ok") {
-        throw new Error("Backend is not healthy.");
-      }
-
-      setBackendConnected(true);
-
-      const recordsResponse = await fetch(`${API_URL}/api/cultural-records`);
-
-      if (!recordsResponse.ok) {
-        throw new Error("Could not load cultural records.");
-      }
-
-      const recordsData: CulturalRecord[] = await recordsResponse.json();
-      setRecords(recordsData);
-      console.log("Records received by frontend:", recordsData);
-
-      try {
-        const settingsResponse = await fetch(`${API_URL}/api/settings`);
-
-  if (!settingsResponse.ok) {
-    throw new Error("Could not load SQLite settings.");
-  }
-
-  const settingsData: AppSettings = await settingsResponse.json();
-
-  setSettings(settingsData);
+  setLoading(true);
+  setError("");
   setSettingsError("");
-} catch {
-  setSettings(null);
-  setSettingsError("Unable to load SQLite settings.");
+
+  try {
+    const healthResponse = await fetch(`${apiUrl}/health`);
+
+    if (!healthResponse.ok) {
+      throw new Error("Backend health check failed.");
+    }
+
+    const healthData = await healthResponse.json();
+
+    if (healthData.status !== "ok") {
+      throw new Error("Backend is not healthy.");
+    }
+
+    setBackendConnected(true);
+
+    let recordsData: CulturalRecord[];
+    let settingsData: AppSettings;
+
+    if (isTauri()) {
+      // Protected requests go through Rust; the secret stays out of React.
+      recordsData = await invoke<CulturalRecord[]>("get_cultural_records");
+      settingsData = await invoke<AppSettings>("get_app_settings");
+    } else {
+      // Browser development mode: health works, but protected endpoints
+      // require authentication and are not called directly here.
+      throw new Error(
+        "Protected API data must be loaded through the Tauri desktop app."
+      );
+    }
+
+    setRecords(recordsData);
+    setSettings(settingsData);
+  } catch (err) {
+    setBackendConnected(false);
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Unable to load dashboard data."
+    );
+    setSettings(null);
+    setSettingsError("Unable to load local application settings.");
+    console.error("Dashboard loading failed:", err);
+  } finally {
+    setLoading(false);
+  }
 }
 
-    } catch {
-      setBackendConnected(false);
-      setError(
-        "Unable to connect to the backend. Check that FastAPI is running on port 8001."
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
 
   useEffect(() => {
+  if (apiUrl) {
     void loadDashboardData();
-  }, []);
+    }
+  }, [apiUrl]);
 
-  const connectedCount = Number(backendConnected) + Number(backendConnected);
+  const connectedCount =
+  Number(backendConnected) +
+  Number(backendConnected && records.length >= 0) +
+  Number(settings !== null);
 
   return (
     <div className="app-shell">

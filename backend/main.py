@@ -3,15 +3,38 @@ from pathlib import Path
 
 import sqlite3
 import duckdb
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+import hmac
+import os
+from fastapi import Header
 
 
 app = FastAPI(
     title="Local AI Cultural Analytics Dashboard",
     version="0.1.0",
 )
+
+def verify_local_secret(
+    x_local_secret: str | None = Header(default=None),
+):
+    expected_secret = os.environ.get("LOCAL_APP_SECRET")
+
+    if not expected_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Local security secret is not configured.",
+        )
+
+    if x_local_secret is None or not hmac.compare_digest(
+        x_local_secret,
+        expected_secret,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid local security secret.",
+        )
 
 # this is CORS Configuration to allow request from the frontend running on localhost:5173
 app.add_middleware(
@@ -103,7 +126,7 @@ def health_check():
     return {"status": "ok"}
 
 
-@app.get("/api/cultural-records")
+@app.get("/api/cultural-records",dependencies=[Depends(verify_local_secret)],)
 def get_cultural_records():
     with duckdb.connect(str(DB_PATH), read_only=True) as connection:
         rows = connection.execute("""
@@ -123,7 +146,8 @@ def get_cultural_records():
     ]
 
 
-@app.post("/api/cultural-records", status_code=201)
+@app.post("/api/cultural-records", 
+          status_code=201,dependencies=[Depends(verify_local_secret)],)
 def create_cultural_record(record: CulturalRecord):
     try:
         with duckdb.connect(str(DB_PATH)) as connection:
@@ -148,7 +172,8 @@ def create_cultural_record(record: CulturalRecord):
 
 
 
-@app.get("/api/settings")
+@app.get("/api/settings",
+         dependencies=[Depends(verify_local_secret)],)
 def get_settings():
     with sqlite3.connect(SQLITE_DB_PATH) as connection:
         rows = connection.execute(
@@ -158,7 +183,8 @@ def get_settings():
     return {key: value for key, value in rows}
 
 
-@app.put("/api/settings/{key}")
+@app.put("/api/settings/{key}",
+         dependencies=[Depends(verify_local_secret)],)
 def update_setting(key: str, value: str):
     allowed_keys = {"theme", "language"}
 

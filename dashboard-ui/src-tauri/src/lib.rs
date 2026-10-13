@@ -8,11 +8,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde_json::Value;
 use tauri::{Manager, RunEvent, State};
 
 struct BackendState {
     child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
+    secret: Mutex<Option<String>>,
 }
 
 #[tauri::command]
@@ -25,13 +27,28 @@ fn get_backend_port(state: State<'_, BackendState>) -> Result<u16, String> {
     port.ok_or_else(|| "Backend has not started yet".to_string())
 }
 
-fn start_backend() -> Result<(Child, u16), String> {
-    let project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn start_backend() -> Result<(Child, u16, String), String> {
+    let mut secret_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut secret_bytes);
+
+    let local_secret = secret_bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let project_root = manifest_dir
         .parent()
         .and_then(|path| path.parent())
-        .ok_or_else(|| "Could not locate project root".to_string())?;
+        .ok_or_else(|| "Could not locate project root".to_string())?
+        .to_path_buf();
 
-    let python = project_root.join(".venv").join("Scripts").join("python.exe");
+    let python = project_root
+        .join(".venv")
+        .join("Scripts")
+        .join("python.exe");
+
     let launcher = project_root.join("backend").join("launcher.py");
 
     if !python.exists() {
@@ -45,6 +62,7 @@ fn start_backend() -> Result<(Child, u16), String> {
     let mut child = Command::new(python)
         .arg(launcher)
         .current_dir(&project_root)
+        .env("LOCAL_APP_SECRET", &local_secret)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -87,17 +105,19 @@ fn start_backend() -> Result<(Child, u16), String> {
                     .try_wait()
                     .map_err(|error| format!("Could not check backend process: {error}"))?
                 {
-                    return Err(format!("FastAPI exited before startup completed: {status}"));
+                    return Err(format!(
+                        "FastAPI exited before startup completed: {status}"
+                    ));
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("FastAPI closed its output before providing a port".to_string());
+                return Err(
+                    "FastAPI closed its output before providing a port".to_string()
+                );
             }
         }
     };
 
-    // The launcher prints the port before Uvicorn is fully ready.
-    // Wait until the health endpoint accepts a connection.
     let health_deadline = Instant::now() + Duration::from_secs(15);
 
     loop {
@@ -114,7 +134,63 @@ fn start_backend() -> Result<(Child, u16), String> {
         thread::sleep(Duration::from_millis(200));
     }
 
-    Ok((child, port))
+    Ok((child, port, local_secret))
+}
+
+async fn fetch_protected_json(
+    state: &BackendState,
+    endpoint: &str,
+) -> Result<Value, String> {
+    let (port, secret) = {
+        let port = state
+            .port
+            .lock()
+            .map_err(|_| "Backend port lock failed".to_string())?
+            .ok_or_else(|| "Backend has not started yet".to_string())?;
+
+        let secret = state
+            .secret
+            .lock()
+            .map_err(|_| "Backend secret lock failed".to_string())?
+            .clone()
+            .ok_or_else(|| "Backend secret is unavailable".to_string())?;
+
+        (port, secret)
+    };
+
+    let url = format!("http://127.0.0.1:{port}{endpoint}");
+
+    let response = reqwest::Client::new()
+        .get(url)
+        .header("X-Local-Secret", secret)
+        .send()
+        .await
+        .map_err(|error| format!("Could not contact local backend: {error}"))?;
+
+    let status = response.status();
+
+    if !status.is_success() {
+        return Err(format!("Backend returned HTTP {status}"));
+    }
+
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("Could not read backend JSON: {error}"))
+}
+
+#[tauri::command]
+async fn get_cultural_records(
+    state: State<'_, BackendState>,
+) -> Result<Value, String> {
+    fetch_protected_json(&state, "/api/cultural-records").await
+}
+
+#[tauri::command]
+async fn get_app_settings(
+    state: State<'_, BackendState>,
+) -> Result<Value, String> {
+    fetch_protected_json(&state, "/api/settings").await
 }
 
 fn stop_backend(state: &BackendState) {
@@ -124,6 +200,14 @@ fn stop_backend(state: &BackendState) {
             let _ = child.wait();
         }
     }
+
+    if let Ok(mut secret) = state.secret.lock() {
+        *secret = None;
+    }
+
+    if let Ok(mut port) = state.port.lock() {
+        *port = None;
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -131,15 +215,20 @@ pub fn run() {
     let state = BackendState {
         child: Mutex::new(None),
         port: Mutex::new(None),
+        secret: Mutex::new(None),
     };
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
-        .invoke_handler(tauri::generate_handler![get_backend_port])
+        .invoke_handler(tauri::generate_handler![
+            get_backend_port,
+            get_cultural_records,
+            get_app_settings
+        ])
         .setup(|app| {
-            let (child, port) = start_backend()
-                .map_err(|error| std::io::Error::other(error))?;
+            let (child, port, secret) =
+                start_backend().map_err(std::io::Error::other)?;
 
             let state = app.state::<BackendState>();
 
@@ -150,6 +239,10 @@ pub fn run() {
             *state.port.lock().map_err(|_| {
                 std::io::Error::other("Backend port lock failed")
             })? = Some(port);
+
+            *state.secret.lock().map_err(|_| {
+                std::io::Error::other("Backend secret lock failed")
+            })? = Some(secret);
 
             println!("FastAPI is ready on 127.0.0.1:{port}");
             Ok(())
