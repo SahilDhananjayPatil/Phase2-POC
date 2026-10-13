@@ -1,3 +1,6 @@
+import urllib.error
+import urllib.request
+import json
 
 from pathlib import Path
 
@@ -124,6 +127,59 @@ def startup():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+#   this code is for ollema
+    
+@app.get(
+    "/api/ollama/status",
+    dependencies=[Depends(verify_local_secret)],
+)
+def get_ollama_status():
+    ollama_url = "http://127.0.0.1:11434/api/tags"
+
+    try:
+        request = urllib.request.Request(
+            ollama_url,
+            headers={"Accept": "application/json"},
+        )
+
+        with urllib.request.urlopen(request, timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        models = [
+            {
+                "name": model.get("name", "unknown"),
+                "size": model.get("size", 0),
+            }
+            for model in data.get("models", [])
+        ]
+
+        return {
+            "available": True,
+            "model_count": len(models),
+            "models": models,
+            "message": (
+                "Ollama is running, but no models are installed."
+                if not models
+                else "Ollama is running and local models are available."
+            ),
+        }
+
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return {
+            "available": False,
+            "model_count": 0,
+            "models": [],
+            "message": "Ollama is not reachable. Start the local Ollama service.",
+        }
+
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(
+            status_code=502,
+            detail="Ollama returned an invalid response.",
+        )
+
 
 
 @app.get("/api/cultural-records",dependencies=[Depends(verify_local_secret)],)
