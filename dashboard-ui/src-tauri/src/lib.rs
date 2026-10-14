@@ -193,6 +193,14 @@ async fn get_app_settings(
     fetch_protected_json(&state, "/api/settings").await
 }
 
+// chatGPT has told me to add this
+#[tauri::command]
+async fn get_ollama_status(
+    state: State<'_, BackendState>,
+) -> Result<Value, String> {
+    fetch_protected_json(&state, "/api/ollama/status").await
+}
+
 fn stop_backend(state: &BackendState) {
     if let Ok(mut child_guard) = state.child.lock() {
         if let Some(mut child) = child_guard.take() {
@@ -224,7 +232,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_backend_port,
             get_cultural_records,
-            get_app_settings
+            get_app_settings,
+            get_ollama_status
         ])
         .setup(|app| {
             let (child, port, secret) =

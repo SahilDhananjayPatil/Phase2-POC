@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import "./App.css";
 
-const API_URL = "http://127.0.0.1:8001";
+// const API_URL = "http://127.0.0.1:8001";
 
 type CulturalRecord = {
   id: number;
@@ -15,6 +15,17 @@ type CulturalRecord = {
 type AppSettings = {
   theme: string;
   language: string;
+};
+
+// for ollama status
+type OllamaStatus = {
+  available: boolean;
+  model_count: number;
+  models: {
+    name: string;
+    size: number;
+  }[];
+  message: string;
 };
 
 const services = [
@@ -29,6 +40,8 @@ const activity = [
   { time: "Now", title: "Backend connection check", detail: "Live status is checked from FastAPI", type: "System" },
   { time: "Local", title: "Cultural records loaded", detail: "Records retrieved from the backend API", type: "Database" },
 ];
+
+
 
 function App() {
   const [apiUrl, setApiUrl] = useState<string | null>(null);
@@ -63,6 +76,9 @@ useEffect(() => {
 
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [settingsError, setSettingsError] = useState("");
+
+  const [ollamaStatus, setOllamaStatus] =
+  useState<OllamaStatus | null>(null);
 
   
 
@@ -105,6 +121,22 @@ async function loadDashboardData() {
 
     setRecords(recordsData);
     setSettings(settingsData);
+
+    try {
+  const ollamaData = await invoke<OllamaStatus>(
+    "get_ollama_status"
+  );
+  setOllamaStatus(ollamaData);
+} catch (err) {
+  console.error("Ollama status check failed:", err);
+  setOllamaStatus({
+    available: false,
+    model_count: 0,
+    models: [],
+    message: "Ollama status is unavailable.",
+  });
+}
+
   } catch (err) {
     setBackendConnected(false);
     setError(
@@ -130,7 +162,8 @@ async function loadDashboardData() {
   const connectedCount =
   Number(backendConnected) +
   Number(backendConnected && records.length >= 0) +
-  Number(settings !== null);
+  Number(settings !== null) +
+  Number(ollamaStatus?.available === true);
 
   return (
     <div className="app-shell">
@@ -226,11 +259,13 @@ async function loadDashboardData() {
                 //   backendConnected &&
                 //   (service.name === "FastAPI Backend" || service.name === "DuckDB");
                 const isConnected =
-                  backendConnected &&
+                  service.name === "Ollama"
+                  ? ollamaStatus?.available === true
+                  : backendConnected &&
                   (
-                  service.name === "FastAPI Backend" ||
-                  service.name === "DuckDB" ||
-                  (service.name === "SQLite" && settings !== null)
+                    service.name === "FastAPI Backend" ||
+                    service.name === "DuckDB" ||
+                    (service.name === "SQLite" && settings !== null)
                   );
 
                 return (
@@ -245,11 +280,12 @@ async function loadDashboardData() {
                     <div className="connection-status">
                       <span className="status-dot" />
                       <span>
-                        {loading && service.name === "FastAPI Backend"
+                        {(loading && service.name === "FastAPI Backend") ||
+                          ollamaStatus === null && service.name === "Ollama"
                           ? "Checking..."
                           : isConnected
-                            ? "Connected"
-                            : "Not connected"}
+                          ? "Connected"
+                          : "Not connected"}
                       </span>
                     </div>
                   </article>
