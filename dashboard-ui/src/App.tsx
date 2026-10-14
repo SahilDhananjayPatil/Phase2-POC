@@ -90,14 +90,10 @@ async function loadDashboardData() {
   setSettingsError("");
 
   try {
-    const healthResponse = await fetch(`${apiUrl}/health`);
-
-    if (!healthResponse.ok) {
-      throw new Error("Backend health check failed.");
-    }
-
-    const healthData = await healthResponse.json();
-
+    const healthData = await invoke<{ status: string }>(
+      "get_backend_health"
+    );
+    
     if (healthData.status !== "ok") {
       throw new Error("Backend is not healthy.");
     }

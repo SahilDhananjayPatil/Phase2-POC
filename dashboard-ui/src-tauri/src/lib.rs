@@ -27,6 +27,36 @@ fn get_backend_port(state: State<'_, BackendState>) -> Result<u16, String> {
     port.ok_or_else(|| "Backend has not started yet".to_string())
 }
 
+// this code is added by me and told by GPT to add here 
+#[tauri::command]
+async fn get_backend_health(
+    state: State<'_, BackendState>,
+) -> Result<Value, String> {
+    let port = state
+        .port
+        .lock()
+        .map_err(|_| "Backend port lock failed".to_string())?
+        .ok_or_else(|| "Backend has not started yet".to_string())?;
+
+    let url = format!("http://127.0.0.1:{port}/health");
+
+    let response = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("Health check failed: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Health endpoint returned HTTP {}", response.status()));
+    }
+
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("Could not read health JSON: {error}"))
+}
+
+
 fn start_backend() -> Result<(Child, u16, String), String> {
     let mut secret_bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut secret_bytes);
@@ -233,7 +263,8 @@ pub fn run() {
             get_backend_port,
             get_cultural_records,
             get_app_settings,
-            get_ollama_status
+            get_ollama_status,
+            get_backend_health
         ])
         .setup(|app| {
             let (child, port, secret) =
